@@ -20,7 +20,7 @@ internal sealed class CrumbHelper
     private static CrumbHelper? _instance;
 
     internal static HttpMessageHandler? handler;
-    private static HttpClientHandler? _clientHandler;
+    private static HttpMessageHandler? _cachedHandler;
 
     #endregion
 
@@ -84,27 +84,36 @@ internal sealed class CrumbHelper
         return Instance;
     }
 
-    private static HttpClientHandler GetClientHandler()
+    private static HttpMessageHandler GetClientHandler()
     {
-        if (_clientHandler != null) return _clientHandler;
+        if (_cachedHandler != null) return _cachedHandler;
 
-        var h = YahooClient.IsThrottled
-            ? new DownloadThrottleQueueHandler(40, TimeSpan.FromMinutes(1), 4) //40 calls in a minute, no more than 4 simultaneously
-            : new HttpClientHandler();
+        HttpMessageHandler h;
 
-        if (h is HttpClientHandler httpClientHandler)
+        if (YahooClient.IsThrottled)
         {
-            httpClientHandler.AllowAutoRedirect = true;
-            httpClientHandler.UseCookies = true; // Ensure cookies are used
-            // net48 doesn't support DecompressionMethods.All (introduced in .NET 7)
+            h = new DownloadThrottleQueueHandler(40, TimeSpan.FromMinutes(1), 4); //40 calls in a minute, no more than 4 simultaneously
+        }
+        else
+        {
 #if NET48
-            httpClientHandler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+            h = new HttpClientHandler
+            {
+                AllowAutoRedirect = true,
+                UseCookies = true,
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            };
 #else
-            httpClientHandler.AutomaticDecompression = DecompressionMethods.All;
+            h = new SocketsHttpHandler
+            {
+                AllowAutoRedirect = true,
+                UseCookies = true,
+                AutomaticDecompression = DecompressionMethods.All
+            };
 #endif
         }
-        
-        _clientHandler = h;
+
+        _cachedHandler = h;
         return h;
     }
 
@@ -142,14 +151,18 @@ internal sealed class CrumbHelper
     {
         _instance = null;
         handler = null;
-        _clientHandler?.Dispose();
-        _clientHandler = null;
+        (_cachedHandler as IDisposable)?.Dispose();
+        _cachedHandler = null;
     }
 
     #endregion
 }
 
+#if NET48
 internal class DownloadThrottleQueueHandler : HttpClientHandler
+#else
+internal class DownloadThrottleQueueHandler : DelegatingHandler
+#endif
 {
     #region Fields
 
@@ -168,12 +181,16 @@ internal class DownloadThrottleQueueHandler : HttpClientHandler
         _throttleLoad = new SemaphoreSlim(maxParallel, maxParallel);
         _throttleRate = new SemaphoreSlim(maxPerPeriod, maxPerPeriod);
         _maxPeriod = maxPeriod;
-        AllowAutoRedirect = true;
-        // net48 doesn't support DecompressionMethods.All (introduced in .NET 7)
+
 #if NET48
+        AllowAutoRedirect = true;
         AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
 #else
-        AutomaticDecompression = DecompressionMethods.All;
+        InnerHandler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = true,
+            AutomaticDecompression = DecompressionMethods.All
+        };
 #endif
     }
 
